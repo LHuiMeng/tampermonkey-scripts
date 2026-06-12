@@ -1,16 +1,17 @@
 // ==UserScript==
 // @name         Epic 免费游戏提醒
 // @namespace    https://huimeng.dpdns.org
-// @version      1.0.1
+// @version      1.1.0
 // @author       洛诗
-// @description  每天检查 Epic Games Store 免费游戏，新游戏弹窗提醒；标记已领取后不再重复提醒。
+// @description  每天检查 Epic Games Store 免费游戏，弹窗提醒 + 一键跳转自动领取
 // @match        https://*/*
-// @exclude      https://*.epicgames.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_notification
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @connect      store-site-backend-static-ipv4.ak.epicgames.com
+// @updateURL    https://raw.githubusercontent.com/LHuiMeng/tampermonkey-scripts/main/epic-free-games/epic-free-games.user.js
+// @downloadURL  https://raw.githubusercontent.com/LHuiMeng/tampermonkey-scripts/main/epic-free-games/epic-free-games.user.js
 // @icon         https://www.epicgames.com/favicon.ico
 // @license      MIT
 // ==/UserScript==
@@ -24,18 +25,17 @@
   const STORE_BASE = 'https://store.epicgames.com/zh-CN/p/';
   const STORAGE_KEY = 'epic_free_games_state';
   const NOTIFICATION_TAG = 'epic-free-games';
+  const AUTO_CLAIM_FLAG = 'epic_auto_claim_slug';
+
+  const IS_EPIC =
+    location.hostname === 'store.epicgames.com' ||
+    location.hostname === 'www.epicgames.com';
 
   // ── 存储读写 ──────────────────────────────────────────
   function loadState() {
     const raw = GM_getValue(STORAGE_KEY, null);
-    if (!raw) {
-      return { lastCheckDate: '', reminders: {} };
-    }
-    try {
-      return JSON.parse(raw);
-    } catch (_) {
-      return { lastCheckDate: '', reminders: {} };
-    }
+    if (!raw) return { lastCheckDate: '', reminders: {} };
+    try { return JSON.parse(raw); } catch (_) { return { lastCheckDate: '', reminders: {} }; }
   }
 
   function saveState(state) {
@@ -54,16 +54,8 @@
         url: API_URL,
         timeout: 15000,
         onload(r) {
-          if (r.status !== 200) {
-            reject(new Error(`HTTP ${r.status}`));
-            return;
-          }
-          try {
-            const data = JSON.parse(r.responseText);
-            resolve(data);
-          } catch (e) {
-            reject(e);
-          }
+          if (r.status !== 200) return reject(new Error(`HTTP ${r.status}`));
+          try { resolve(JSON.parse(r.responseText)); } catch (e) { reject(e); }
         },
         onerror() { reject(new Error('网络请求失败')); },
         ontimeout() { reject(new Error('请求超时')); },
@@ -83,7 +75,6 @@
       const title = game.title || '未知游戏';
       const priceInfo = game.price?.totalPrice || {};
       const originalPrice = (priceInfo.originalPrice || 0) / 100;
-
       const promotions = game.promotions;
       if (!promotions) continue;
 
@@ -134,16 +125,136 @@
       text: body,
       tag: NOTIFICATION_TAG,
       timeout: 8000,
-      onclick() {
-        // 点击通知 → 聚焦/打开第一个免费游戏链接
-        window.focus();
-      },
+      onclick() { window.focus(); },
     });
+  }
+
+  // ═══════════════════════════════════════════════════════
+  //  自动领取（仅在 store.epicgames.com 下运行）
+  // ═══════════════════════════════════════════════════════
+
+  /** 查找页面上"获取"类按钮 */
+  function findClaimButton() {
+    // 遍历所有可见按钮，匹配"获取"/"GET"/"Free"等文字
+    const keywords = ['获取', 'get', 'free', '免费', '立即获取', '入库'];
+    const allBtns = document.querySelectorAll('button, a[role="button"], span[role="button"]');
+
+    for (const btn of allBtns) {
+      const text = (btn.textContent || '').trim().toLowerCase();
+      // 排除"已在库中"/"in library"等已领取标识
+      if (/已在库中|in library|已拥有|owned/i.test(text)) return null;
+
+      for (const kw of keywords) {
+        if (text.includes(kw.toLowerCase())) {
+          // 确认按钮可见且可点击
+          if (btn.offsetParent !== null && !btn.disabled) {
+            return btn;
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  /** 查找确认弹窗中的"下单"/"确认"按钮 */
+  function findConfirmButton() {
+    const keywords = ['下单', '确认', 'place order', 'confirm', '提交订单', '购买', 'purchase', 'checkout'];
+    const allBtns = document.querySelectorAll('button, a[role="button"], span[role="button"]');
+
+    for (const btn of allBtns) {
+      const text = (btn.textContent || '').trim().toLowerCase();
+      for (const kw of keywords) {
+        if (text.includes(kw.toLowerCase())) {
+          if (btn.offsetParent !== null && !btn.disabled) {
+            return btn;
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  /** 查找确认弹窗中的下单按钮（iframe 内） */
+  function findConfirmInIframe() {
+    const iframes = document.querySelectorAll('iframe');
+    for (const iframe of iframes) {
+      try {
+        const doc = iframe.contentDocument || iframe.contentWindow.document;
+        if (!doc) continue;
+        const btns = doc.querySelectorAll('button');
+        for (const btn of btns) {
+          const text = (btn.textContent || '').trim().toLowerCase();
+          if (/下单|确认|place order|confirm|purchase|checkout/.test(text)) {
+            if (btn.offsetParent !== null && !btn.disabled) {
+              return btn;
+            }
+          }
+        }
+      } catch (_) {
+        // 跨域 iframe 无法访问，跳过
+      }
+    }
+    return null;
+  }
+
+  /** 等待元素出现 */
+  function waitFor(fn, timeout = 8000, interval = 300) {
+    return new Promise((resolve) => {
+      const start = Date.now();
+      const timer = setInterval(() => {
+        const result = fn();
+        if (result) {
+          clearInterval(timer);
+          resolve(result);
+        } else if (Date.now() - start > timeout) {
+          clearInterval(timer);
+          resolve(null);
+        }
+      }, interval);
+    });
+  }
+
+  /** 核心：自动领取流程 */
+  async function autoClaim(targetSlug) {
+    console.log('[Epic免费提醒] 开始自动领取:', targetSlug);
+
+    // Step 1: 等页面渲染完成，找"获取"按钮
+    const claimBtn = await waitFor(findClaimButton, 10000, 500);
+    if (!claimBtn) {
+      console.log('[Epic免费提醒] 未找到"获取"按钮 — 可能已登录但游戏非免费、或已拥有');
+      return 'NO_BUTTON';
+    }
+
+    console.log('[Epic免费提醒] 找到获取按钮，点击...');
+    claimBtn.click();
+
+    // Step 2: 等待确认弹窗出现（可能在 iframe 或主页面 overlay 中）
+    // 先等一小段让弹窗渲染
+    await new Promise((r) => setTimeout(r, 1500));
+
+    const confirmBtn =
+      (await waitFor(findConfirmButton, 6000, 400)) ||
+      (await waitFor(findConfirmInIframe, 4000, 400));
+
+    if (!confirmBtn) {
+      console.log('[Epic免费提醒] 未找到确认按钮 — 可能弹窗未出现或需要手动操作');
+      return 'NO_CONFIRM';
+    }
+
+    console.log('[Epic免费提醒] 找到确认按钮，点击下单...');
+    confirmBtn.click();
+
+    // Step 3: 等待结果（成功/失败提示）
+    await new Promise((r) => setTimeout(r, 2000));
+
+    // 清除自动领取标记
+    sessionStorage.removeItem(AUTO_CLAIM_FLAG);
+    console.log('[Epic免费提醒] 自动领取流程完成 ✓');
+    return 'OK';
   }
 
   // ── 弹窗 UI ──────────────────────────────────────────
   function createPanel(currentGames, upcomingGames, state) {
-    // 移除旧面板
     const old = document.getElementById('epic-free-panel');
     if (old) old.remove();
 
@@ -158,7 +269,7 @@
   function buildPanelHTML(current, upcoming, state) {
     const curHTML = current.length
       ? current
-          .map((g, i) => {
+          .map((g) => {
             const claimed = state.reminders[g.id]?.claimed;
             const btnLabel = claimed ? '✓ 已领' : '去领取';
             const btnClass = claimed ? 'epic-btn-done' : 'epic-btn-go';
@@ -166,8 +277,8 @@
             <div class="epic-game-row">
               <span class="epic-game-title" title="${escapeHTML(g.title)}">${escapeHTML(g.title)}</span>
               <span class="epic-game-price">原¥${g.originalPrice}</span>
-              <button class="${btnClass}" data-action="go" data-idx="${i}" data-id="${g.id}">${btnLabel}</button>
-              ${claimed ? '' : `<button class="epic-btn-claim" data-action="claim" data-idx="${i}" data-id="${g.id}">标记已领</button>`}
+              <button class="${btnClass}" data-action="go" data-id="${g.id}" data-slug="${g.slug}">${btnLabel}</button>
+              ${claimed ? '' : `<button class="epic-btn-claim" data-action="claim" data-id="${g.id}">标记已领</button>`}
             </div>`;
           })
           .join('')
@@ -263,7 +374,6 @@
   }
 
   function bindPanelEvents(panel, currentGames, state) {
-    // 按钮事件
     panel.addEventListener('click', (e) => {
       const btn = e.target.closest('button');
       if (!btn) return;
@@ -271,10 +381,10 @@
       const gameId = btn.dataset.id;
 
       if (action === 'go') {
-        // 构造 Epic Store 领取链接：id 就是 product slug 的一部分
-        // 实际跳转到搜索页或直接打开 store 页面
         const game = currentGames.find((g) => g.id === gameId);
         if (game) {
+          // 设置自动领取标记
+          sessionStorage.setItem(AUTO_CLAIM_FLAG, game.slug);
           window.open(STORE_BASE + game.slug, '_blank');
         }
       }
@@ -282,25 +392,19 @@
       if (action === 'claim') {
         state.reminders[gameId] = { notified: true, claimed: true };
         saveState(state);
-        // 刷新面板
         createPanel(currentGames, [], state);
       }
 
-      if (action === 'close') {
-        panel.remove();
-      }
+      if (action === 'close') panel.remove();
 
       if (action === 'minimize') {
         panel.classList.toggle('epic-minimized');
-        const btnEl = btn;
-        btnEl.textContent = panel.classList.contains('epic-minimized') ? '▶' : '◀';
+        btn.textContent = panel.classList.contains('epic-minimized') ? '▶' : '◀';
       }
     });
 
     // 拖拽
-    let dragging = false,
-      ox,
-      oy;
+    let dragging = false, ox, oy;
     const header = panel.querySelector('.epic-header');
     header.addEventListener('mousedown', (e) => {
       if (e.target.closest('button')) return;
@@ -328,14 +432,57 @@
     return d.innerHTML;
   }
 
-  // ── 主流程 ────────────────────────────────────────────
-  async function main() {
+  // ═══════════════════════════════════════════════════════
+  //  主流程
+  // ═══════════════════════════════════════════════════════
+
+  // ── Epic 页面：检测自动领取标记 ──
+  async function epicPageMain() {
+    const targetSlug = sessionStorage.getItem(AUTO_CLAIM_FLAG);
+    if (!targetSlug) return; // 没有自动领取标记，正常浏览
+
+    // 验证当前页面 URL 是否匹配目标
+    if (!location.pathname.includes(targetSlug)) return;
+
+    // 延迟等页面加载
+    await new Promise((r) => setTimeout(r, 2000));
+
+    // 先检查是否已登录
+    const loginBtn = document.querySelector('[data-testid="sign-in-link"], a[href*="login"]');
+    // 简单检测：有登录按钮 = 未登录，有用户头像/名称 = 已登录
+    const loggedIn = !document.querySelector('a[href*="/login"]');
+
+    if (!loggedIn) {
+      // 未登录：清除标记，不做操作（用户需要手动登录后再领取）
+      sessionStorage.removeItem(AUTO_CLAIM_FLAG);
+      console.log('[Epic免费提醒] 未登录，跳过自动领取');
+      return;
+    }
+
+    const result = await autoClaim(targetSlug);
+
+    if (result === 'OK') {
+      // 自动标记为已领取
+      const state = loadState();
+      // 从当前 URL 反查 game id...实际上我们只有 slug，那就遍历存储找匹配
+      const cachedCurrent = state._cachedCurrent || [];
+      const matchedGame = cachedCurrent.find((g) => g.slug === targetSlug);
+      if (matchedGame) {
+        state.reminders[matchedGame.id] = { notified: true, claimed: true };
+        saveState(state);
+      }
+      notify('✅ Epic 已领取', `成功领取免费游戏！`);
+    } else if (result === 'NO_BUTTON') {
+      console.log('[Epic免费提醒] 未找到获取按钮，可能需要手动操作');
+    }
+  }
+
+  // ── 第三方页面：检查 API + 展示面板 ──
+  async function thirdPartyMain() {
     const state = loadState();
     const today = todayStr();
 
-    // 今天已检查过 → 只展示静态面板（不请求 API）
     if (state.lastCheckDate === today) {
-      // 从存储中恢复上次的展示数据
       const cachedCurrent = state._cachedCurrent || [];
       const cachedUpcoming = state._cachedUpcoming || [];
       if (cachedCurrent.length > 0) {
@@ -344,60 +491,47 @@
       return;
     }
 
-    // 需要检查
     try {
       const data = await fetchFreeGames();
       const { current, upcoming } = parseFreeGames(data);
 
-      // 更新存储
       state.lastCheckDate = today;
       state._cachedCurrent = current;
       state._cachedUpcoming = upcoming;
 
-      // 找出新出现的免费游戏（之前没提醒过的）
       const newGames = current.filter((g) => {
         const r = state.reminders[g.id];
         return !r || (!r.claimed && !r.notified);
       });
 
-      // 清理已过期的提醒记录
       const currentIds = new Set(current.map((g) => g.id));
       for (const id of Object.keys(state.reminders)) {
-        if (!currentIds.has(id)) {
-          delete state.reminders[id];
-        }
+        if (!currentIds.has(id)) delete state.reminders[id];
       }
 
-      // 标记新游戏为已通知
       for (const g of newGames) {
         state.reminders[g.id] = { notified: true, claimed: false };
       }
       saveState(state);
 
-      // 弹通知
       if (newGames.length === 1) {
         const g = newGames[0];
-        notify(
-          `🎮 Epic 限免: ${g.title}`,
-          `原价 ¥${g.originalPrice} → 免费！截止 ${g.endDate.slice(0, 10)}`
-        );
+        notify(`🎮 Epic 限免: ${g.title}`, `原价 ¥${g.originalPrice} → 免费！截止 ${g.endDate.slice(0, 10)}`);
       } else if (newGames.length >= 2) {
         const names = newGames.map((g) => g.title).join('、');
-        notify(
-          `🎮 Epic 本周限免 (${newGames.length}款)`,
-          `${names} — 快去领取！`
-        );
+        notify(`🎮 Epic 本周限免 (${newGames.length}款)`, `${names} — 快去领取！`);
       }
 
-      // 展示面板
       createPanel(current, upcoming, state);
     } catch (err) {
       console.warn('[Epic免费提醒] API请求失败:', err.message);
-      // 失败不打扰用户，静默跳过
     }
   }
 
-  // ── 启动 ──────────────────────────────────────────────
-  // 延迟 3 秒启动，避免阻塞页面加载
-  setTimeout(main, 3000);
+  // ── 入口 ──────────────────────────────────────────────
+  if (IS_EPIC) {
+    setTimeout(epicPageMain, 2000);
+  } else {
+    setTimeout(thirdPartyMain, 3000);
+  }
 })();
