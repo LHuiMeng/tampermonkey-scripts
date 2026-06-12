@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Epic 免费游戏提醒
 // @namespace    https://huimeng.dpdns.org
-// @version      2.0.1
+// @version      2.0.2
 // @author       洛诗
 // @description  每天检查 Epic Games Store 免费游戏，弹窗提醒 + 一键跳转自动领取。支持倒计时、通知降级、触屏拖拽。
 // @match        https://*/*
@@ -541,7 +541,7 @@
       #epic-free-panel::-webkit-scrollbar { width: 4px; }
       #epic-free-panel::-webkit-scrollbar-track { background: #1a1a2e; }
       #epic-free-panel::-webkit-scrollbar-thumb { background: #0078F2; border-radius: 2px; }
-      #epic-free-panel.epic-minimized { transform: translateX(340px); }
+      #epic-free-panel.epic-minimized { max-height: 46px; overflow: hidden; }
       .epic-header {
         display: flex; align-items: center; justify-content: space-between;
         margin-bottom: 12px; cursor: grab;
@@ -655,6 +655,9 @@
 
       if (action === 'close') {
         if (panel._countdownTimer) clearInterval(panel._countdownTimer);
+        // 记录今天已关闭，当天不再弹出
+        state._panelDismissedToday = todayStr();
+        saveState(state);
         panel.remove();
       }
 
@@ -796,7 +799,21 @@
       }
       notify('✅ Epic 已领取', '成功领取免费游戏！');
     } else if (result === 'NO_BUTTON') {
-      console.log('[Epic免费提醒] 未找到领取按钮，可能已拥有或需手动操作');
+      // 检测是否「已在库中」— 自动标记为已领取
+      const bodyText = document.body.innerText;
+      const alreadyOwned = /已在库中|in library|已拥有|owned/i.test(bodyText);
+      if (alreadyOwned) {
+        const state = loadState();
+        const cachedCurrent = state._cachedCurrent || [];
+        const matchedGame = cachedCurrent.find((g) => g.slug === targetSlug);
+        if (matchedGame) {
+          state.reminders[matchedGame.id] = { notified: true, claimed: true };
+          saveState(state);
+          console.log('[Epic免费提醒] 检测到「已在库中」，自动标记已领取:', matchedGame.title);
+        }
+      } else {
+        console.log('[Epic免费提醒] 未找到领取按钮，可能已拥有或需手动操作');
+      }
     } else if (result === 'NO_CONFIRM') {
       console.log('[Epic免费提醒] 确认弹窗未出现，可能需手动确认');
     }
@@ -814,6 +831,9 @@
     const withinInterval = state.lastCheckMs && (now - state.lastCheckMs) < recheckMs;
 
     if (!forceRefresh && isSameDay && withinInterval) {
+      // 如果今天已关闭过面板，静默跳过
+      if (state._panelDismissedToday === today) return;
+
       // 使用缓存
       const cachedCurrent = state._cachedCurrent || [];
       const cachedUpcoming = state._cachedUpcoming || [];
@@ -863,16 +883,22 @@
         notify(`🎮 Epic 本周限免 (${newGames.length}款)`, `${names} — 快去领取！`);
       }
 
-      // 展示面板
-      createPanel(current, upcoming, state);
+      // 展示面板（如果今天未关闭过）
+      if (state._panelDismissedToday !== today) {
+        createPanel(current, upcoming, state);
+      } else {
+        console.log('[Epic免费提醒] 今天已关闭面板，跳过显示');
+      }
     } catch (err) {
       console.warn('[Epic免费提醒] API请求失败:', err.message);
 
-      // 如果有缓存，降级显示缓存
-      const cachedCurrent = state._cachedCurrent || [];
-      const cachedUpcoming = state._cachedUpcoming || [];
-      if (cachedCurrent.length > 0 || cachedUpcoming.length > 0) {
-        createPanel(cachedCurrent, cachedUpcoming, state);
+      // 如果有缓存，降级显示缓存（如果今天未关闭过）
+      if (state._panelDismissedToday !== today) {
+        const cachedCurrent = state._cachedCurrent || [];
+        const cachedUpcoming = state._cachedUpcoming || [];
+        if (cachedCurrent.length > 0 || cachedUpcoming.length > 0) {
+          createPanel(cachedCurrent, cachedUpcoming, state);
+        }
       }
     }
   }
