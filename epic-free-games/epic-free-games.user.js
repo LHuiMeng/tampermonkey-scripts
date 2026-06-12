@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Epic 免费游戏提醒
 // @namespace    https://huimeng.dpdns.org
-// @version      1.0.0
+// @version      1.0.1
 // @author       洛诗
 // @description  每天检查 Epic Games Store 免费游戏，新游戏弹窗提醒；标记已领取后不再重复提醒。
 // @match        https://*/*
@@ -91,9 +91,15 @@
       for (const og of promotions.promotionalOffers || []) {
         for (const offer of og.promotionalOffers || []) {
           if (offer.discountSetting?.discountPercentage === 0) {
+            const slug =
+              game.productSlug ||
+              (game.offerMappings || [{}])[0].pageSlug ||
+              (game.catalogNs?.mappings || [{}])[0].pageSlug ||
+              game.id;
             current.push({
               id: game.id,
               title,
+              slug,
               originalPrice,
               startDate: offer.startDate,
               endDate: offer.endDate,
@@ -269,7 +275,7 @@
         // 实际跳转到搜索页或直接打开 store 页面
         const game = currentGames.find((g) => g.id === gameId);
         if (game) {
-          window.open(STORE_BASE + game.id, '_blank');
+          window.open(STORE_BASE + game.slug, '_blank');
         }
       }
 
