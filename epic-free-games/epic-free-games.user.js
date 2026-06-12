@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Epic 免费游戏提醒
 // @namespace    https://huimeng.dpdns.org
-// @version      2.0.0
+// @version      2.0.1
 // @author       洛诗
 // @description  每天检查 Epic Games Store 免费游戏，弹窗提醒 + 一键跳转自动领取。支持倒计时、通知降级、触屏拖拽。
 // @match        https://*/*
@@ -284,7 +284,7 @@
   // ═══════════════════════════════════════════════════════
 
   function findClaimButton() {
-    const keywords = ['获取', 'get', 'free', '免费', '立即获取', '入库'];
+    const keywords = ['获取', '立即获取', 'get', 'free', '免费', '入库', '领取'];
     const allBtns = document.querySelectorAll('button, a[role="button"], span[role="button"]');
 
     for (const btn of allBtns) {
@@ -303,7 +303,7 @@
   }
 
   function findConfirmButton() {
-    const keywords = ['下单', '确认', 'place order', 'confirm', '提交订单', '购买', 'purchase', 'checkout'];
+    const keywords = ['添加到库', '下单', '确认', '入库', '立即购买', 'add to library', 'place order', 'confirm', '提交订单', '购买', 'purchase', 'checkout', 'get', '免费', '领取'];
     const allBtns = document.querySelectorAll('button, a[role="button"], span[role="button"]');
 
     for (const btn of allBtns) {
@@ -328,7 +328,7 @@
         const btns = doc.querySelectorAll('button');
         for (const btn of btns) {
           const text = (btn.textContent || '').trim().toLowerCase();
-          if (/下单|确认|place order|confirm|purchase|checkout/.test(text)) {
+          if (/添加到库|下单|确认|入库|立即购买|place order|confirm|purchase|checkout|get library|add to library/i.test(text)) {
             if (btn.offsetParent !== null && !btn.disabled) {
               return btn;
             }
@@ -368,36 +368,66 @@
     return hasUserMenu || hasAvatar || !signInVisible;
   }
 
+  /** 安全点击 — 兼容 React 合成事件 */
+  function safeClick(el) {
+    if (!el) return;
+    // 先尝试原生 click
+    el.click();
+    // 再派发完整的 MouseEvent 确保 React 事件系统能捕获
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+  }
+
   async function autoClaim(targetSlug) {
     console.log('[Epic免费提醒] 开始自动领取:', targetSlug);
 
     // Step 1: 等页面渲染，找"获取"按钮
-    const claimBtn = await waitFor(findClaimButton, 12000, 500);
+    const claimBtn = await waitFor(findClaimButton, 15000, 500);
     if (!claimBtn) {
       console.log('[Epic免费提醒] 未找到"获取"按钮 — 可能已拥有或页面未加载完毕');
       return 'NO_BUTTON';
     }
 
-    console.log('[Epic免费提醒] 找到获取按钮，点击...');
-    claimBtn.click();
+    console.log('[Epic免费提醒] 找到获取按钮:', claimBtn.textContent.trim(), '→ 点击...');
+    safeClick(claimBtn);
 
-    // Step 2: 等待确认弹窗
-    await new Promise((r) => setTimeout(r, 2000));
+    // Step 2: 等待确认弹窗（Epic 结账弹窗可能较慢）
+    await new Promise((r) => setTimeout(r, 3000));
 
-    const confirmBtn =
-      (await waitFor(findConfirmButton, 8000, 400)) ||
-      (await waitFor(findConfirmInIframe, 5000, 400));
+    // 先尝试主页面找确认按钮
+    let confirmBtn = await waitFor(findConfirmButton, 10000, 400);
+
+    // 如果没找到，尝试 iframe
+    if (!confirmBtn) {
+      console.log('[Epic免费提醒] 主页面未找到确认按钮，尝试 iframe...');
+      confirmBtn = await waitFor(findConfirmInIframe, 5000, 400);
+    }
+
+    // 如果还没找到，再等 3 秒重试一次（Epic 弹窗有时延迟渲染）
+    if (!confirmBtn) {
+      console.log('[Epic免费提醒] 第一轮未找到，等待 3s 重试...');
+      await new Promise((r) => setTimeout(r, 3000));
+      confirmBtn = await waitFor(findConfirmButton, 8000, 400) ||
+                   await waitFor(findConfirmInIframe, 5000, 400);
+    }
 
     if (!confirmBtn) {
-      console.log('[Epic免费提醒] 未找到确认按钮');
+      console.log('[Epic免费提醒] 未找到确认按钮 — 页面 DOM 快照:');
+      // 打印所有可见按钮帮助调试
+      const visibleBtns = Array.from(document.querySelectorAll('button, a[role="button"], span[role="button"]'))
+        .filter(b => b.offsetParent !== null)
+        .map(b => b.textContent.trim().substring(0, 40))
+        .filter(Boolean);
+      console.log('  可见按钮:', visibleBtns.join(' | '));
       return 'NO_CONFIRM';
     }
 
-    console.log('[Epic免费提醒] 找到确认按钮，点击下单...');
-    confirmBtn.click();
+    console.log('[Epic免费提醒] 找到确认按钮:', confirmBtn.textContent.trim(), '→ 点击...');
+    safeClick(confirmBtn);
 
     // Step 3: 等待结果
-    await new Promise((r) => setTimeout(r, 2500));
+    await new Promise((r) => setTimeout(r, 3000));
 
     console.log('[Epic免费提醒] 自动领取流程完成 ✓');
     return 'OK';
@@ -738,8 +768,8 @@
     // 验证当前 URL 是否匹配
     if (!location.pathname.includes(targetSlug)) return;
 
-    // 等待页面加载
-    await new Promise((r) => setTimeout(r, 2500));
+    // 等待页面加载（Epic 是 React SPA，需要更长时间渲染）
+    await new Promise((r) => setTimeout(r, 4000));
 
     // 检测登录状态
     if (!isLoggedIn()) {
