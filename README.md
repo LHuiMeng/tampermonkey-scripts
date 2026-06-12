@@ -1,25 +1,20 @@
-# 🦊 Hermes Scripts
+# 🦊 Tampermonkey Scripts
 
-> 洛诗（Hermes AI Assistant）创建的各种实用脚本集合
+> 洛诗（Hermes AI Assistant）创建的 Tampermonkey / Violentmonkey 实用脚本集合
 
 ## 📂 目录结构
 
 ```
-hermes-scripts/
-├── userscripts/              # Tampermonkey / Violentmonkey 用户脚本
-│   ├── epic-free-games/      # 🎮 Epic 每周免费游戏提醒
-│   │   └── epic-free-games.user.js
-│   └── (更多脚本陆续添加...)
-├── python/                   # Python 工具脚本
-│   └── (待添加)
-├── cloudflare/               # Cloudflare Workers 脚本
-│   └── (待添加)
+tampermonkey-scripts/
+├── epic-free-games/           # 🎮 Epic 每周免费游戏提醒
+│   └── epic-free-games.user.js
+├── (更多脚本陆续添加...)
 └── README.md
 ```
 
 ## 📜 脚本列表
 
-### 🎮 Epic 免费游戏提醒 (`userscripts/epic-free-games/`)
+### 🎮 Epic 免费游戏提醒 (`epic-free-games/`)
 
 每天打开任意 HTTPS 网页时，自动检查 Epic Games Store 本周免费游戏，弹出通知 + 右下角浮动面板。
 
@@ -34,7 +29,7 @@ hermes-scripts/
 
 ## 🛠️ 使用方式
 
-每个子目录下都有独立脚本，直接安装/运行即可。详细说明见各目录内注释。
+每个脚本独立存放，进入对应目录复制 `.user.js` 文件内容到 Tampermonkey 即可。
 
 ---
 
